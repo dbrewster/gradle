@@ -25,6 +25,7 @@ import org.gradle.internal.logging.events.ProgressCompleteEvent;
 import org.gradle.internal.logging.events.ProgressEvent;
 import org.gradle.internal.logging.events.ProgressStartEvent;
 import org.gradle.internal.logging.events.OperationIdentifier;
+import org.gradle.internal.logging.progress.ProgressLoggerFactory;
 
 import java.util.ArrayDeque;
 import java.util.Deque;
@@ -111,7 +112,7 @@ public class WorkInProgressRenderer extends BatchOutputEventListener {
     }
 
     private void attach(ProgressOperation operation) {
-        // Skip attach if a children is already present
+        // Skip attach if a child is already present or no progress message to display
         if (isChildAssociationAlreadyExists(operation.getOperationId())) {
             return;
         }
@@ -129,7 +130,7 @@ public class WorkInProgressRenderer extends BatchOutputEventListener {
         }
 
         // No parent? Try to use a new label
-        if (association == null && !unusedProgressLabels.isEmpty()) {
+        if (!unusedProgressLabels.isEmpty()) {
             association = new AssociationLabel(operation, unusedProgressLabels.pop());
         }
 
@@ -170,7 +171,7 @@ public class WorkInProgressRenderer extends BatchOutputEventListener {
     private void removeDirectChildOperationId(OperationIdentifier parentId, OperationIdentifier childId) {
         Set<OperationIdentifier> children = parentIdToChildrenIds.get(parentId);
         if (children == null) {
-            throw new IllegalStateException("");
+            return;
         }
         children.remove(childId);
         if (children.isEmpty()) {
@@ -193,6 +194,11 @@ public class WorkInProgressRenderer extends BatchOutputEventListener {
         for (StyledLabel emptyLabel : unusedProgressLabels) {
             emptyLabel.setText(labelFormatter.format());
         }
+    }
+
+    private boolean isPhaseOperation(ProgressOperation operation) {
+        return operation.getParent() == null
+            || operation.getParent().getOperationId().getId() == ProgressLoggerFactory.ROOT_PROGRESS_OPERATION_ID;
     }
 
     private class AssociationLabel {
