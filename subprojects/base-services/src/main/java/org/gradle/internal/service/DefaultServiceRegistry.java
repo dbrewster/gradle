@@ -111,7 +111,7 @@ public class DefaultServiceRegistry implements ServiceRegistry, Closeable {
         this.ownServices = new OwnServices();
         if (parents.isEmpty()) {
             this.parentServices = null;
-            this.allServices = ownServices;
+            this.allServices = new CachingProvider(ownServices);
         } else {
             if (parents.size() == 1) {
                 this.parentServices = new ParentServices(parents.iterator().next());
@@ -123,7 +123,7 @@ public class DefaultServiceRegistry implements ServiceRegistry, Closeable {
                 this.parentServices = new CompositeProvider(providers);
             }
             List<Provider> allProviders = new ArrayList<Provider>(2);
-            allProviders.add(ownServices);
+            allProviders.add(new CachingProvider(ownServices));
             allProviders.add(parentServices);
             allServices = new CachingProvider(new CompositeProvider(allProviders));
         }
