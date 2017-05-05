@@ -15,9 +15,13 @@
  */
 package org.gradle.internal.service;
 
+import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
+import com.google.common.collect.Sets;
 import org.gradle.api.Action;
 import org.gradle.api.Nullable;
 import org.gradle.api.specs.Spec;
+import org.gradle.internal.Cast;
 import org.gradle.internal.Factory;
 import org.gradle.internal.concurrent.CompositeStoppable;
 import org.gradle.internal.concurrent.Stoppable;
@@ -59,7 +63,9 @@ import java.util.concurrent.ConcurrentMap;
  * <li>Calling {@link #addProvider(Object)} to register a service provider bean. A provider bean may have factory, decorator and configuration methods as described below.</li>
  *
  * <li>Adding a factory method. A factory method should have a name that starts with 'create', and have a non-void return type. For example, <code>protected SomeService createSomeService() { ....
- * }</code>. Parameters are injected using services from this registry or its parents. Parameter of type {@link ServiceRegistry} will receive the service registry that owns the service. Parameter ot type {@code List<T>} will receive all services of type T, if any. Note that factory methods with a single parameter and an return type equal to that parameter type are interpreted as decorator methods.</li>
+ * }</code>. Parameters are injected using services from this registry or its parents. Parameter of type {@link ServiceRegistry} will receive the service registry that owns the service. Parameter ot
+ * type {@code List<T>} will receive all services of type T, if any. Note that factory methods with a single parameter and an return type equal to that parameter type are interpreted as decorator
+ * methods.</li>
  *
  * <li>Adding a decorator method. A decorator method should have a name that starts with 'decorate', take a single parameter, and a have return type equal to the parameter type. Before invoking the
  * method, the parameter is located in the parent service registry and then passed to the method.</li>
@@ -149,6 +155,11 @@ public class DefaultServiceRegistry implements ServiceRegistry, Closeable {
     @Override
     public String toString() {
         return getDisplayName();
+    }
+
+    @Override
+    public Set<Class<?>> getProvidedServiceTypes() {
+        return allServices.getProvidedServiceTypes();
     }
 
     static class RelevantMethods {
@@ -490,18 +501,36 @@ public class DefaultServiceRegistry implements ServiceRegistry, Closeable {
          * Collects all services of the given type.
          */
         void getAll(LookupContext context, Class<?> serviceType, List<ServiceProvider> result);
+
+        Set<Class<?>> getProvidedServiceTypes();
+    }
+
+    private static Collection<Provider> filterProviders(List<Provider> allProviders, Map<Class<?>, Set<Provider>> all, Class<?> type) {
+        if (type == Object.class) {
+            return allProviders;
+        }
+        Set<Provider> providers = all.get(type);
+        if (providers == null) {
+            providers = Collections.emptySet();
+        }
+        return providers;
     }
 
     private class OwnServices implements Provider {
         private List<Provider> providers;
+        private Map<Class<?>, Set<Provider>> providersByType;
 
         @Override
         public ServiceProvider getFactory(LookupContext context, Class<?> type) {
             if (providers == null) {
                 return null;
             }
-            List<ServiceProvider> candidates = new ArrayList<ServiceProvider>();
-            for (Provider provider : providers) {
+            Collection<Provider> matchingProviders = filterProviders(providers, providersByType, Factory.class);
+            if (matchingProviders.isEmpty()) {
+                return null;
+            }
+            List<ServiceProvider> candidates = Lists.newArrayListWithExpectedSize(1);
+            for (Provider provider : matchingProviders) {
                 ServiceProvider factory = provider.getFactory(context, type);
                 if (factory != null) {
                     candidates.add(factory);
@@ -534,7 +563,9 @@ public class DefaultServiceRegistry implements ServiceRegistry, Closeable {
             }
             ServiceProvider singleCandidate = null;
             List<ServiceProvider> candidates = null;
-            for (Provider provider : providers) {
+            Class<?> type = unwrap(serviceType.getType());
+            Collection<Provider> matchingProviders = filterProviders(providers, providersByType, type);
+            for (Provider provider : matchingProviders) {
                 ServiceProvider service = provider.getService(context, serviceType);
                 if (service != null) {
                     if (singleCandidate == null) {
@@ -552,7 +583,7 @@ public class DefaultServiceRegistry implements ServiceRegistry, Closeable {
             if (candidates == null && singleCandidate == null) {
                 return null;
             }
-            if (candidates==null) {
+            if (candidates == null) {
                 return singleCandidate;
             }
 
@@ -562,7 +593,7 @@ public class DefaultServiceRegistry implements ServiceRegistry, Closeable {
             }
 
             Formatter formatter = new Formatter();
-            formatter.format("Multiple services of type %s available in %s:", format(serviceType.getType()), getDisplayName());
+            formatter.format("Multiple services of type %s available in %s:", format(type), getDisplayName());
             for (String description : descriptions) {
                 formatter.format("%n   - %s", description);
             }
@@ -580,6 +611,18 @@ public class DefaultServiceRegistry implements ServiceRegistry, Closeable {
         }
 
         @Override
+        public Set<Class<?>> getProvidedServiceTypes() {
+            if (providers == null) {
+                return Collections.emptySet();
+            }
+            Set<Class<?>> serviceTypes = Sets.newHashSet();
+            for (Provider provider : providers) {
+                serviceTypes.addAll(provider.getProvidedServiceTypes());
+            }
+            return serviceTypes;
+        }
+
+        @Override
         public void stop() {
             if (providers == null) {
                 return;
@@ -589,10 +632,38 @@ public class DefaultServiceRegistry implements ServiceRegistry, Closeable {
 
         public void add(Provider provider) {
             if (providers == null) {
-                providers = new ArrayList<Provider>();
+                providers = Lists.newArrayList();
+                providersByType = Maps.newHashMap();
             }
             this.providers.add(provider);
+            Set<Class<?>> serviceTypes = provider.getProvidedServiceTypes();
+            for (Class<?> serviceType : serviceTypes) {
+                registerServiceByType(provider, serviceType, Sets.<Class<?>>newIdentityHashSet());
+            }
         }
+
+        private void registerServiceByType(Provider provider, Class<?> serviceType, Set<Class<?>> seen) {
+            if (serviceType == null || serviceType == Object.class || seen.contains(serviceType)) {
+                return;
+            }
+            Set<Provider> providersByType = this.providersByType.get(serviceType);
+            if (providersByType == null) {
+                providersByType = Sets.newHashSet();
+                this.providersByType.put(serviceType, providersByType);
+            }
+            providersByType.add(provider);
+            for (Class<?> intf : serviceType.getInterfaces()) {
+                registerServiceByType(provider, intf, seen);
+            }
+            registerServiceByType(provider, serviceType.getSuperclass(), seen);
+        }
+    }
+
+    private static Class<?> unwrap(Type serviceType) {
+        if (serviceType instanceof ParameterizedType) {
+            serviceType = ((ParameterizedType) serviceType).getRawType();
+        }
+        return Cast.uncheckedCast(serviceType);
     }
 
     private static abstract class ManagedObjectProvider<T> implements Provider {
@@ -641,7 +712,7 @@ public class DefaultServiceRegistry implements ServiceRegistry, Closeable {
 
         SingletonService(Type serviceType) {
             this.serviceType = serviceType;
-            serviceClass = toClass(serviceType);
+            serviceClass = unwrap(serviceType);
         }
 
         @Override
@@ -689,7 +760,7 @@ public class DefaultServiceRegistry implements ServiceRegistry, Closeable {
         }
 
         private boolean isFactory(Type type, Class<?> elementType) {
-            Class c = toClass(type);
+            Class<?> c = unwrap(type);
             if (!Factory.class.isAssignableFrom(c)) {
                 return false;
             }
@@ -715,13 +786,9 @@ public class DefaultServiceRegistry implements ServiceRegistry, Closeable {
             return false;
         }
 
-        private Class toClass(Type type) {
-            if (type instanceof Class) {
-                return (Class) type;
-            } else {
-                ParameterizedType parameterizedType = (ParameterizedType) type;
-                return (Class) parameterizedType.getRawType();
-            }
+        @Override
+        public Set<Class<?>> getProvidedServiceTypes() {
+            return Collections.<Class<?>>singleton((Class<?>) serviceClass);
         }
     }
 
@@ -801,7 +868,7 @@ public class DefaultServiceRegistry implements ServiceRegistry, Closeable {
         }
 
         public String getDisplayName() {
-            return "Service " + format(method.getGenericReturnType()) + " at " + method.getDeclaringClass().getSimpleName() + "." +  method.getName() + "()";
+            return "Service " + format(method.getGenericReturnType()) + " at " + method.getDeclaringClass().getSimpleName() + "." + method.getName() + "()";
         }
 
         protected Type[] getParameterTypes() {
@@ -836,6 +903,11 @@ public class DefaultServiceRegistry implements ServiceRegistry, Closeable {
                 // Can discard the state required to create instance
                 target = null;
             }
+        }
+
+        @Override
+        public Set<Class<?>> getProvidedServiceTypes() {
+            return Collections.<Class<?>>singleton(method.getReturnType());
         }
     }
 
@@ -905,6 +977,11 @@ public class DefaultServiceRegistry implements ServiceRegistry, Closeable {
 
         public String getDisplayName() {
             return "Service " + format(serviceType);
+        }
+
+        @Override
+        public Set<Class<?>> getProvidedServiceTypes() {
+            return Collections.<Class<?>>singleton((Class<?>) serviceType);
         }
     }
 
@@ -1018,6 +1095,11 @@ public class DefaultServiceRegistry implements ServiceRegistry, Closeable {
         }
 
         @Override
+        public Set<Class<?>> getProvidedServiceTypes() {
+            return delegate.getProvidedServiceTypes();
+        }
+
+        @Override
         public void stop() {
             delegate.stop();
             seen.clear();
@@ -1068,6 +1150,15 @@ public class DefaultServiceRegistry implements ServiceRegistry, Closeable {
             } finally {
                 providers.clear();
             }
+        }
+
+        @Override
+        public Set<Class<?>> getProvidedServiceTypes() {
+            Set<Class<?>> serviceTypes = Sets.newHashSet();
+            for (Provider provider : providers) {
+                serviceTypes.addAll(provider.getProvidedServiceTypes());
+            }
+            return serviceTypes;
         }
     }
 
@@ -1132,6 +1223,11 @@ public class DefaultServiceRegistry implements ServiceRegistry, Closeable {
         }
 
         @Override
+        public Set<Class<?>> getProvidedServiceTypes() {
+            return parent.getProvidedServiceTypes();
+        }
+
+        @Override
         public void stop() {
         }
     }
@@ -1190,6 +1286,11 @@ public class DefaultServiceRegistry implements ServiceRegistry, Closeable {
         @Override
         public int hashCode() {
             return type.hashCode();
+        }
+
+        @Override
+        public String toString() {
+            return type.toString();
         }
     }
 

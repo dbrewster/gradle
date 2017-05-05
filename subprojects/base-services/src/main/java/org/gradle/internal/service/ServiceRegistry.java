@@ -19,6 +19,7 @@ import org.gradle.internal.Factory;
 
 import java.lang.reflect.Type;
 import java.util.List;
+import java.util.Set;
 
 /**
  * A registry of services.
@@ -75,4 +76,6 @@ public interface ServiceRegistry {
      * @throws ServiceLookupException On failure to lookup the specified service factory.
      */
     <T> T newInstance(Class<T> type) throws UnknownServiceException, ServiceLookupException;
+
+    Set<Class<?>> getProvidedServiceTypes();
 }
