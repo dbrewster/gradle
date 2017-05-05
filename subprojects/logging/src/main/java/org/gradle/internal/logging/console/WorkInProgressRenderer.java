@@ -19,13 +19,12 @@ package org.gradle.internal.logging.console;
 import org.gradle.internal.logging.events.BatchOutputEventListener;
 import org.gradle.internal.logging.events.EndOutputEvent;
 import org.gradle.internal.logging.events.MaxWorkerCountChangeEvent;
+import org.gradle.internal.logging.events.OperationIdentifier;
 import org.gradle.internal.logging.events.OutputEvent;
 import org.gradle.internal.logging.events.OutputEventListener;
 import org.gradle.internal.logging.events.ProgressCompleteEvent;
 import org.gradle.internal.logging.events.ProgressEvent;
 import org.gradle.internal.logging.events.ProgressStartEvent;
-import org.gradle.internal.logging.events.OperationIdentifier;
-import org.gradle.internal.logging.progress.ProgressLoggerFactory;
 
 import java.util.ArrayDeque;
 import java.util.Deque;
@@ -194,11 +193,6 @@ public class WorkInProgressRenderer extends BatchOutputEventListener {
         for (StyledLabel emptyLabel : unusedProgressLabels) {
             emptyLabel.setText(labelFormatter.format());
         }
-    }
-
-    private boolean isPhaseOperation(ProgressOperation operation) {
-        return operation.getParent() == null
-            || operation.getParent().getOperationId().getId() == ProgressLoggerFactory.ROOT_PROGRESS_OPERATION_ID;
     }
 
     private class AssociationLabel {

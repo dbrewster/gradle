@@ -54,7 +54,6 @@ public class InitScriptHandler {
 
             @Override
             public BuildOperationDescriptor.Builder description() {
-                // TODO: optionally group initialization messages
                 return BuildOperationDescriptor.displayName("Run init scripts").progressDisplayName("init scripts");
             }
         });

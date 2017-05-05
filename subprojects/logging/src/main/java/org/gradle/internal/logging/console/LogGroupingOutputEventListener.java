@@ -19,6 +19,7 @@ package org.gradle.internal.logging.console;
 import com.google.common.collect.Lists;
 import org.gradle.api.Nullable;
 import org.gradle.api.logging.LogLevel;
+import org.gradle.internal.SystemProperties;
 import org.gradle.internal.logging.events.BatchOutputEventListener;
 import org.gradle.internal.logging.events.CategorisedOutputEvent;
 import org.gradle.internal.logging.events.EndOutputEvent;
@@ -29,9 +30,13 @@ import org.gradle.internal.logging.events.ProgressCompleteEvent;
 import org.gradle.internal.logging.events.ProgressEvent;
 import org.gradle.internal.logging.events.ProgressStartEvent;
 import org.gradle.internal.logging.events.RenderableOutputEvent;
+import org.gradle.internal.logging.events.StyledTextOutputEvent;
+import org.gradle.internal.logging.text.StyledTextOutput;
 import org.gradle.internal.progress.BuildOperationType;
+import org.gradle.internal.time.TimeProvider;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -39,11 +44,11 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 
 public class LogGroupingOutputEventListener extends BatchOutputEventListener {
-    // FIXME(ew): This breaks OutputEventRendererTest.rendersLogEventsInConsoleWhenLogLevelIsDebug() — perhaps everything is being output as LogEvents from this thing?
-
     static final int SCHEDULER_CHECK_PERIOD_MS = 5000;
+    public static final String EOL = SystemProperties.getInstance().getLineSeparator();
     private final BatchOutputEventListener listener;
     private final ScheduledExecutorService executor;
+    private final TimeProvider timeProvider;
     private final Object lock = new Object();
 
     // Allows us to map progress and complete events to start events
@@ -55,14 +60,16 @@ public class LogGroupingOutputEventListener extends BatchOutputEventListener {
     // Event groups that are in-progress and have not been completed
     private final Map<Object, ArrayList<CategorisedOutputEvent>> outputEventGroups = new LinkedHashMap<Object, ArrayList<CategorisedOutputEvent>>();
     private Object lastRenderedOperationId;
+    private boolean needsHeader;
 
-    public LogGroupingOutputEventListener(BatchOutputEventListener listener) {
-        this(listener, Executors.newSingleThreadScheduledExecutor());
+    public LogGroupingOutputEventListener(BatchOutputEventListener listener, TimeProvider timeProvider) {
+        this(listener, Executors.newSingleThreadScheduledExecutor(), timeProvider);
     }
 
-    LogGroupingOutputEventListener(BatchOutputEventListener listener, ScheduledExecutorService executor) {
+    LogGroupingOutputEventListener(BatchOutputEventListener listener, ScheduledExecutorService executor, TimeProvider timeProvider) {
         this.listener = listener;
         this.executor = executor;
+        this.timeProvider = timeProvider;
     }
 
     @Override
@@ -106,8 +113,9 @@ public class LogGroupingOutputEventListener extends BatchOutputEventListener {
 
             if (event.getBuildOperationType() == BuildOperationType.TASK || event.getBuildOperationType() == BuildOperationType.CONFIGURE_PROJECT) {
                 // TODO: check whether child of another task
-                CategorisedOutputEvent header = new LogEvent(event.getTimestamp(), event.getCategory(), LogLevel.QUIET, "[" + event.getDescription() + "]", null);
-                outputEventGroups.put(buildOpId, Lists.newArrayList(header, event));
+                List<StyledTextOutputEvent.Span> header = Collections.singletonList(makeHeader(event));
+                CategorisedOutputEvent headerEvent = new StyledTextOutputEvent(event.getTimestamp(), event.getCategory(), LogLevel.QUIET, buildOpId, header);
+                outputEventGroups.put(buildOpId, Lists.newArrayList(headerEvent, event));
             } else {
                 groupOrForward(buildOpId, event);
             }
@@ -116,22 +124,28 @@ public class LogGroupingOutputEventListener extends BatchOutputEventListener {
         }
     }
 
+    private StyledTextOutputEvent.Span makeHeader(ProgressStartEvent event) {
+        final String message;
+        if (event.getLoggingHeader() != null) {
+            message = event.getLoggingHeader();
+        } else if (event.getShortDescription() != null) {
+            message = event.getShortDescription();
+        } else {
+            message = event.getDescription();
+        }
+        return new StyledTextOutputEvent.Span(StyledTextOutput.Style.Header, "> " + message + EOL);
+    }
+
     private void onComplete(ProgressCompleteEvent event) {
-        Object buildOperationId = progressIdToBuildOperationIdMap.get(event.getProgressOperationId());
+        Object buildOpId = progressIdToBuildOperationIdMap.get(event.getProgressOperationId());
         Object groupId;
 
-        if (outputEventGroups.containsKey(buildOperationId)) {
+        if (outputEventGroups.containsKey(buildOpId)) {
             // Render group if complete
-            List<OutputEvent> group = new ArrayList<OutputEvent>(outputEventGroups.remove(buildOperationId));
-            if (hasRenderableEvents(group)) {
-                // TODO: write header newline if necessary
-                group.add(event);
-                // Visually indicate a group with an empty line
-                group.add(new LogEvent(event.getTimestamp(), event.getCategory(), LogLevel.QUIET, "", null));
-                listener.onOutput(group);
-                lastRenderedOperationId = buildOperationId;
-            }
-        } else if ((groupId = getGroupId(buildOperationId)) != null) {
+            List<OutputEvent> group = new ArrayList<OutputEvent>(outputEventGroups.remove(buildOpId));
+            group.add(event);
+            renderGroup(buildOpId, group);
+        } else if ((groupId = getGroupId(buildOpId)) != null) {
             // Add to group if possible
             outputEventGroups.get(groupId).add(event);
         } else {
@@ -159,6 +173,9 @@ public class LogGroupingOutputEventListener extends BatchOutputEventListener {
         if (groupId != null) {
             outputEventGroups.get(groupId).add(event);
         } else {
+            if (event instanceof RenderableOutputEvent) {
+                needsHeader = true;
+            }
             listener.onOutput(event);
         }
     }
@@ -176,20 +193,36 @@ public class LogGroupingOutputEventListener extends BatchOutputEventListener {
         return false;
     }
 
+    private boolean renderGroup(Object buildOpId, List<OutputEvent> group) {
+        if (hasRenderableEvents(group)) {
+            // Visually indicate group by adding surrounding lines
+            if (needsHeader) {
+                renderNewLine();
+                needsHeader = false;
+            }
+
+            listener.onOutput(group);
+
+            // Visually indicate a new group by adding a line if not appending to last rendered group
+            if (!buildOpId.equals(lastRenderedOperationId)) {
+                renderNewLine();
+            }
+            lastRenderedOperationId = buildOpId;
+            return true;
+        }
+        return false;
+    }
+
+    private void renderNewLine() {
+        listener.onOutput(new LogEvent(timeProvider.getCurrentTime(), LogGroupingOutputEventListener.class.toString(), LogLevel.QUIET, "", null));
+    }
+
     private void renderAllGroups(Map<Object, ArrayList<CategorisedOutputEvent>> groups) {
         for (Map.Entry<Object, ArrayList<CategorisedOutputEvent>> entry : groups.entrySet()) {
             ArrayList<OutputEvent> group = new ArrayList<OutputEvent>(entry.getValue());
-            if (hasRenderableEvents(group)) {
-                Object buildOperationId = entry.getKey();
-                // Add a new line if not appending to last rendered group
-                if (!buildOperationId.equals(lastRenderedOperationId)) {
-                    CategorisedOutputEvent event = (CategorisedOutputEvent) group.get(group.size() - 1);
-                    group.add(new LogEvent(event.getTimestamp(), event.getCategory(), event.getLogLevel(), "", null));
-                }
-                listener.onOutput(group);
+            if (renderGroup(entry.getKey(), group)) {
                 // Preserve header
                 entry.setValue(Lists.newArrayList((CategorisedOutputEvent) group.get(0)));
-                lastRenderedOperationId = buildOperationId;
             }
         }
     }
